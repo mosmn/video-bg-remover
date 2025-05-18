@@ -70,3 +70,8 @@ logs/
 
 # Distribution / packaging
 .Python
+
+*.mp4
+*.mov
+*.webm
+*.MP4
