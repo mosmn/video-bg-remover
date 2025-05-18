@@ -1,0 +1,9 @@
+torch
+torchvision
+torchaudio
+numpy
+opencv-python
+tqdm
+moviepy
+matplotlib
+requests
