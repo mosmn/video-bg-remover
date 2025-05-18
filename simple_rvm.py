@@ -65,7 +65,8 @@ def init_model(model_path, device='mps'):
 
 def process_video(input_path, output_path, model_path, 
                   output_type='video', bg_color=(0, 255, 0), 
-                  downsample_ratio=1.0, device='auto', transparent=False):
+                  downsample_ratio=1.0, device='auto', transparent=False,
+                  mp4_alpha=False):
     """
     Process a video to remove the background
     
@@ -78,6 +79,7 @@ def process_video(input_path, output_path, model_path,
         downsample_ratio: Downscale factor for faster processing
         device: Computing device ('auto', 'cpu', 'cuda', or 'mps')
         transparent: Whether to create a video with transparency
+        mp4_alpha: Whether to create an MP4 with green screen for transparency
     """
     # Choose the best available device
     if device == 'auto':
@@ -327,6 +329,119 @@ def process_video(input_path, output_path, model_path,
             print(f"Cleaning up temporary frames in {temp_frames_dir}")
             shutil.rmtree(temp_frames_dir)
     
+    # If MP4 with green screen for transparency requested
+    if mp4_alpha:
+        print("\nCreating MP4 with green screen for transparency...")
+        
+        # Create temporary green screen video
+        temp_video = f"{output_path}_temp.mp4"
+        
+        # Create green screen background
+        green_bg = np.zeros((height, width, 3), dtype=np.uint8)
+        green_bg[:, :] = (0, 255, 0)
+        
+        # Create video writer
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(temp_video, fourcc, fps, (width, height))
+        
+        # Rewind or reopen video capture to reset
+        cap = cv2.VideoCapture(input_path)
+        
+        # Reset recurrent states
+        r1 = r2 = r3 = r4 = None
+        
+        # Process frames
+        with tqdm(total=frame_count, unit='frames', desc="Creating green screen video") as progress:
+            frame_idx = 0
+            
+            with torch.no_grad():
+                while True:
+                    # Read frame
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    
+                    # Convert to RGB and normalize
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) / 255.0
+                    
+                    # Convert to tensor
+                    tensor = torch.from_numpy(frame_rgb).float()
+                    tensor = tensor.permute(2, 0, 1).unsqueeze(0)
+                    
+                    # Resize if needed
+                    if downsample_ratio != 1.0:
+                        tensor_input = torch.nn.functional.interpolate(
+                            tensor, 
+                            scale_factor=downsample_ratio,
+                            mode='bilinear', 
+                            align_corners=False,
+                            recompute_scale_factor=True
+                        )
+                    else:
+                        tensor_input = tensor
+                    
+                    # Move to device
+                    tensor_input = tensor_input.to(device)
+                    
+                    # Forward pass
+                    fgr, pha, *rec = model(tensor_input, r1, r2, r3, r4)
+                    r1, r2, r3, r4 = rec
+                    
+                    # Resize back to original resolution if needed
+                    if downsample_ratio != 1.0:
+                        fgr = torch.nn.functional.interpolate(fgr, size=(height, width), mode='bilinear', align_corners=False)
+                        pha = torch.nn.functional.interpolate(pha, size=(height, width), mode='bilinear', align_corners=False)
+                    
+                    # Convert to numpy
+                    fgr = fgr[0].cpu().numpy().transpose(1, 2, 0)
+                    pha = pha[0].cpu().numpy().transpose(1, 2, 0)
+                    
+                    # Composite foreground with green background
+                    composited = fgr * pha + green_bg / 255.0 * (1 - pha)
+                    output_frame = (composited * 255).astype(np.uint8)
+                    
+                    # Write to video
+                    writer.write(cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR))
+                    
+                    # Update progress
+                    frame_idx += 1
+                    progress.update(1)
+        
+        # Cleanup
+        writer.release()
+        cap.release()
+        
+        # Check if input video has audio
+        has_audio = False
+        audio_check = subprocess.run(
+            ['ffmpeg', '-i', input_path, '-f', 'null', '-'],
+            stderr=subprocess.PIPE, stdout=subprocess.PIPE
+        )
+        if b'Audio:' in audio_check.stderr:
+            has_audio = True
+            print("Audio track detected in the input video - will preserve it")
+            
+            # Create final video with audio
+            print("Creating final MP4 with audio...")
+            cmd = [
+                'ffmpeg', '-y', 
+                '-i', temp_video,
+                '-i', input_path, 
+                '-map', '0:v', '-map', '1:a',
+                '-c:v', 'copy', 
+                '-c:a', 'aac', '-b:a', '192k',
+                output_path
+            ]
+            subprocess.run(cmd)
+            
+            # Remove temp video
+            os.remove(temp_video)
+        else:
+            # Just rename the temp video to the output path
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            os.rename(temp_video, output_path)
+    
     print(f"Processing complete! Output saved to: {output_path}")
 
 
@@ -350,6 +465,8 @@ def parse_args():
                         help='Device for processing')
     parser.add_argument('--transparent', '-a', action='store_true',
                         help='Create video with transparency (requires ffmpeg)')
+    parser.add_argument('--mp4-alpha', action='store_true',
+                        help='Create MP4 with green screen for transparency')
     
     return parser.parse_args()
 
@@ -367,5 +484,6 @@ if __name__ == '__main__':
         bg_color=tuple(args.bg_color),
         downsample_ratio=args.downsample,
         device=args.device,
-        transparent=args.transparent
+        transparent=args.transparent,
+        mp4_alpha=args.mp4_alpha
     )
