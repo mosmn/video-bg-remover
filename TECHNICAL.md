@@ -58,8 +58,9 @@ The video processing pipeline consists of several key steps:
 Since different video formats handle transparency differently, we implement several approaches:
 
 #### MOV (QuickTime)
-For true transparency, we generate individual frames and use FFmpeg to create a ProRes 4444 video that preserves the alpha channel:
+For true transparency, we generate individual frames and use FFmpeg to create a ProRes 4444 video that preserves the alpha channel.
 
+Standard quality settings:
 ```python
 cmd = [
     'ffmpeg', '-y', '-framerate', str(fps), 
@@ -72,9 +73,24 @@ cmd = [
 ]
 ```
 
-#### WebM
-For web-compatible transparency, we use the VP9 codec with alpha support:
+High-quality settings for better platform compatibility:
+```python
+cmd = [
+    'ffmpeg', '-y', '-framerate', str(fps), 
+    '-i', f'{temp_frames_dir}/frame_%05d.png',
+    '-i', input_path, '-map', '0:v', '-map', '1:a',
+    '-c:v', 'prores_ks', '-profile:v', '4444',
+    '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16', '-vendor', 'ap10',
+    '-q:v', '5', # Lower values = higher quality (1-5 range for ProRes)
+    '-c:a', 'aac', '-b:a', '192k',
+    output_path
+]
+```
 
+#### WebM
+For web-compatible transparency, we use the VP9 codec with alpha support.
+
+Standard quality settings:
 ```python
 cmd = [
     'ffmpeg', '-y', '-framerate', str(fps), 
@@ -83,6 +99,20 @@ cmd = [
     '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
     '-lossless', '1', '-auto-alt-ref', '0',
     '-c:a', 'libopus', '-b:a', '128k',
+    output_path
+]
+```
+
+High-quality settings for better platform compatibility:
+```python
+cmd = [
+    'ffmpeg', '-y', '-framerate', str(fps), 
+    '-i', f'{temp_frames_dir}/frame_%05d.png',
+    '-i', input_path, '-map', '0:v', '-map', '1:a',
+    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
+    '-crf', '20', '-b:v', '4M', '-deadline', 'best', '-cpu-used', '0',
+    '-auto-alt-ref', '0',
+    '-c:a', 'libopus', '-b:a', '192k',
     output_path
 ]
 ```
@@ -96,6 +126,26 @@ composited = fgr * pha + green_bg / 255.0 * (1 - pha)
 output_frame = (composited * 255).astype(np.uint8)
 ```
 
+### Platform Compatibility for Transparent Videos
+
+Different platforms handle transparent videos in various ways, causing issues when uploading videos to services like Canva or WhatsApp. To address these issues, we've implemented a high-quality mode that produces more compatible video files:
+
+1. **Why transparency issues occur**:
+   - Videos are often re-compressed when uploaded to platforms
+   - Different platforms interpret alpha channels inconsistently
+   - Some encoders don't properly handle alpha channels
+
+2. **Our solutions**:
+   - For WebM: Using more conservative encoding parameters (CRF instead of lossless)
+   - For MOV: Using Apple-specific vendor tags and optimal quality settings
+   - Higher bitrates and explicit alpha bit depth specification
+   - Advanced FFmpeg parameters to ensure consistent encoding
+
+3. **Platform-specific recommendations**:
+   - Canva: MOV with high-quality settings (`--high-quality`)
+   - WhatsApp/Messaging Apps: MP4 with green screen (`--mp4-alpha`)
+   - Websites: WebM with high-quality settings (`--high-quality`)
+
 ### Audio Preservation
 
 We carefully preserve the original audio using FFmpeg's mapping capabilities. The process:
@@ -104,7 +154,8 @@ We carefully preserve the original audio using FFmpeg's mapping capabilities. Th
 2. When creating output video, map the original audio to the new video
 3. Use appropriate audio codec based on output format:
    - AAC for MOV (192kbps)
-   - Opus for WebM (128kbps)
+   - Opus for WebM (128kbps, or 192kbps in high-quality mode)
+   - AAC for MP4 (192kbps)
 
 ### Performance Optimization
 
@@ -165,3 +216,4 @@ To add a new model:
 - **Memory Usage**: The ResNet50 model uses significantly more memory than MobileNetV3
 - **Processing Time**: Using `--downsample 0.5` provides a good balance between speed and quality
 - **M1 Performance**: The MPS backend typically provides 3-5x speedup compared to CPU processing
+- **File Size Tradeoffs**: High-quality mode produces larger files but better platform compatibility

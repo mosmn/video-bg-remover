@@ -14,6 +14,7 @@ A powerful tool for removing backgrounds from videos using Robust Video Matting 
 - ✅ Audio preservation in output videos
 - ✅ Processing speed/quality adjustment with downsampling
 - ✅ Multiple model options (mobilenet vs resnet) for speed/quality trade-offs
+- ✅ Cross-platform compatibility for transparent videos
 
 ## Requirements
 
@@ -88,6 +89,31 @@ Extract all frames as PNG files with transparency:
 python simple_rvm.py --input your_video.mp4 --output frames_folder --output-type frames
 ```
 
+### Cross-Platform Compatibility
+
+For better compatibility with platforms like Canva, WhatsApp, and web applications, use the high-quality option:
+
+```bash
+python simple_rvm.py --input your_video.mp4 --output output.mov --transparent --high-quality
+```
+
+#### Platform-Specific Recommendations
+
+1. **For Canva:** Use MOV with high quality
+   ```bash
+   python simple_rvm.py --input video.mp4 --output canva.mov --transparent --high-quality
+   ```
+
+2. **For WhatsApp and messaging apps:** Use MP4 with green screen
+   ```bash
+   python simple_rvm.py --input video.mp4 --output whatsapp.mp4 --mp4-alpha
+   ```
+
+3. **For websites and web apps:** Use WebM with high quality
+   ```bash
+   python simple_rvm.py --input video.mp4 --output web.webm --transparent --high-quality
+   ```
+
 ### Performance Optimization
 
 For faster processing, use the downsample option (0.5 = half resolution):
@@ -125,6 +151,7 @@ usage: simple_rvm.py [-h] --input INPUT --output OUTPUT [--model MODEL]
                     [--output-type {video,frames,transparent}]
                     [--bg-color BG_COLOR BG_COLOR BG_COLOR] [--downsample DOWNSAMPLE]
                     [--device {auto,cpu,cuda,mps}] [--transparent] [--mp4-alpha]
+                    [--high-quality]
 
 Video Background Removal with RVM
 
@@ -146,6 +173,7 @@ options:
                         Device for processing
   --transparent, -a     Create video with transparency (requires ffmpeg)
   --mp4-alpha          Create MP4 with green screen for transparency
+  --high-quality, -q    Use higher quality settings for better platform compatibility
 ```
 
 ## Technical Details
@@ -188,6 +216,8 @@ options:
 3. **Memory Issues**: Try reducing the resolution with `--downsample 0.5` or `--downsample 0.25`
 
 4. **Poor Quality**: Use the ResNet50 model and avoid downsampling for best quality
+
+5. **Transparency Issues on Platforms**: Use the `--high-quality` option when creating transparent videos that will be uploaded to platforms like Canva or social media
 
 ## Credits
 

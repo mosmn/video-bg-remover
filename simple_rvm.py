@@ -66,12 +66,12 @@ def init_model(model_path, device='mps'):
 def process_video(input_path, output_path, model_path, 
                   output_type='video', bg_color=(0, 255, 0), 
                   downsample_ratio=1.0, device='auto', transparent=False,
-                  mp4_alpha=False):
+                  mp4_alpha=False, high_quality=False):
     """
     Process a video to remove the background
     
     Args:
-        input_path: Path to the input video
+        input_path: Path to input video
         output_path: Path for the output video or folder
         model_path: Path to the RVM model weights (.pth file)
         output_type: Type of output ('video', 'frames', or 'transparent')
@@ -80,6 +80,7 @@ def process_video(input_path, output_path, model_path,
         device: Computing device ('auto', 'cpu', 'cuda', or 'mps')
         transparent: Whether to create a video with transparency
         mp4_alpha: Whether to create an MP4 with green screen for transparency
+        high_quality: Use higher quality settings for better platform compatibility
     """
     # Choose the best available device
     if device == 'auto':
@@ -110,31 +111,27 @@ def process_video(input_path, output_path, model_path,
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
+    # Check if output is WebM format (always requires FFmpeg)
+    is_webm = os.path.splitext(output_path)[1].lower() == '.webm'
+    use_frames = output_type == 'frames' or transparent or is_webm
+    
     # Set up output
-    if output_type == 'frames':
-        # Create frames directory
-        os.makedirs(output_path, exist_ok=True)
-        writer = None
-    elif output_type == 'transparent':
-        # Create temp frames directory for transparent output
-        temp_frames_dir = f"{output_path}_temp_frames"
+    if use_frames:
+        # Create temp frames directory
+        if output_type == 'frames':
+            temp_frames_dir = output_path
+        else:
+            temp_frames_dir = f"{output_path}_temp_frames"
         os.makedirs(temp_frames_dir, exist_ok=True)
         writer = None
-        transparent = True
     else:
-        if transparent:
-            # Create temp frames directory for transparent output
-            temp_frames_dir = f"{output_path}_temp_frames"
-            os.makedirs(temp_frames_dir, exist_ok=True)
-            writer = None
-        else:
-            # Create video writer for standard output
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-            if not writer.isOpened():
-                print(f"Error: Could not create output video: {output_path}")
-                cap.release()
-                return
+        # Create video writer for standard output
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            print(f"Error: Could not create output video: {output_path}")
+            cap.release()
+            return
     
     # Create normalized background color
     bg = np.zeros((height, width, 3), dtype=np.float32)
@@ -199,17 +196,13 @@ def process_video(input_path, output_path, model_path,
                 pha = pha[0].cpu().numpy().transpose(1, 2, 0)
                 
                 # Process output based on type
-                if transparent or output_type == 'transparent':
+                if transparent or output_type == 'transparent' or is_webm:
                     # RGBA output with transparency (PNG format)
                     rgba = np.concatenate([fgr, pha], axis=2)
                     rgba_uint8 = (rgba * 255).astype(np.uint8)
                     
                     # Save as PNG with transparency
-                    if output_type == 'frames':
-                        frame_path = os.path.join(output_path, f"frame_{frame_idx:05d}.png")
-                    else:
-                        frame_path = os.path.join(temp_frames_dir, f"frame_{frame_idx:05d}.png")
-                    
+                    frame_path = os.path.join(temp_frames_dir, f"frame_{frame_idx:05d}.png")
                     cv2.imwrite(frame_path, cv2.cvtColor(rgba_uint8, cv2.COLOR_RGBA2BGRA))
                 
                 elif output_type == 'frames':
@@ -218,7 +211,7 @@ def process_video(input_path, output_path, model_path,
                     output_frame = (composited * 255).astype(np.uint8)
                     
                     # Save as image file
-                    frame_path = os.path.join(output_path, f"frame_{frame_idx:05d}.png")
+                    frame_path = os.path.join(temp_frames_dir, f"frame_{frame_idx:05d}.png")
                     cv2.imwrite(frame_path, cv2.cvtColor(output_frame, cv2.COLOR_RGB2BGR))
                 
                 else:
@@ -238,9 +231,9 @@ def process_video(input_path, output_path, model_path,
     if writer:
         writer.release()
     
-    # If transparent video requested, create it from frames using ffmpeg
-    if transparent or output_type == 'transparent':
-        print("\nCreating transparent video from frames...")
+    # If we need to create a video from frames using ffmpeg
+    if (transparent or output_type == 'transparent' or is_webm) and output_type != 'frames':
+        print("\nCreating video from frames...")
         
         # Check if output format is specified
         _, ext = os.path.splitext(output_path)
@@ -256,45 +249,135 @@ def process_video(input_path, output_path, model_path,
             print("Audio track detected in the input video - will preserve it")
         
         if ext.lower() == '.webm':
-            # WebM with alpha channel
-            if has_audio:
-                cmd = [
-                    'ffmpeg', '-y', '-framerate', str(fps), 
-                    '-i', f'{temp_frames_dir}/frame_%05d.png',
-                    '-i', input_path, '-map', '0:v', '-map', '1:a',
-                    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
-                    '-lossless', '1', '-auto-alt-ref', '0',
-                    '-c:a', 'libopus', '-b:a', '128k',
-                    output_path
-                ]
+            # WebM with VP9 codec
+            if transparent:
+                # WebM with alpha channel
+                if has_audio:
+                    if high_quality:
+                        # Higher quality settings for better platform compatibility
+                        cmd = [
+                            'ffmpeg', '-y', '-framerate', str(fps), 
+                            '-i', f'{temp_frames_dir}/frame_%05d.png',
+                            '-i', input_path, '-map', '0:v', '-map', '1:a',
+                            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
+                            '-crf', '20', '-b:v', '4M', '-deadline', 'best', '-cpu-used', '0',
+                            '-auto-alt-ref', '0',
+                            '-c:a', 'libopus', '-b:a', '192k',
+                            output_path
+                        ]
+                    else:
+                        cmd = [
+                            'ffmpeg', '-y', '-framerate', str(fps), 
+                            '-i', f'{temp_frames_dir}/frame_%05d.png',
+                            '-i', input_path, '-map', '0:v', '-map', '1:a',
+                            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
+                            '-lossless', '1', '-auto-alt-ref', '0',
+                            '-c:a', 'libopus', '-b:a', '128k',
+                            output_path
+                        ]
+                else:
+                    if high_quality:
+                        # Higher quality settings for better platform compatibility
+                        cmd = [
+                            'ffmpeg', '-y', '-framerate', str(fps), 
+                            '-i', f'{temp_frames_dir}/frame_%05d.png',
+                            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
+                            '-crf', '20', '-b:v', '4M', '-deadline', 'best', '-cpu-used', '0',
+                            '-auto-alt-ref', '0',
+                            output_path
+                        ]
+                    else:
+                        cmd = [
+                            'ffmpeg', '-y', '-framerate', str(fps), 
+                            '-i', f'{temp_frames_dir}/frame_%05d.png',
+                            '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
+                            '-lossless', '1', '-auto-alt-ref', '0',
+                            output_path
+                        ]
             else:
-                cmd = [
-                    'ffmpeg', '-y', '-framerate', str(fps), 
-                    '-i', f'{temp_frames_dir}/frame_%05d.png',
-                    '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', 
-                    '-lossless', '1', '-auto-alt-ref', '0',
-                    output_path
-                ]
+                # WebM without alpha channel (standard output with colored background)
+                # First convert PNGs to non-alpha
+                print("Converting frames to RGB for WebM output...")
+                rgb_frames_dir = f"{output_path}_rgb_frames"
+                os.makedirs(rgb_frames_dir, exist_ok=True)
+                
+                for i in range(frame_idx):
+                    frame_path = os.path.join(temp_frames_dir, f"frame_{i:05d}.png")
+                    img = cv2.imread(frame_path, cv2.IMREAD_UNCHANGED)
+                    if img.shape[2] == 4:  # RGBA
+                        # Convert RGBA to RGB with background
+                        rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA) / 255.0
+                        rgb = rgba[:,:,:3] * rgba[:,:,3:4] + (np.array(bg_color) / 255.0) * (1 - rgba[:,:,3:4])
+                        rgb_img = (rgb * 255).astype(np.uint8)
+                    else:
+                        rgb_img = img
+                    
+                    rgb_frame_path = os.path.join(rgb_frames_dir, f"frame_{i:05d}.png")
+                    cv2.imwrite(rgb_frame_path, rgb_img)
+                
+                if has_audio:
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{rgb_frames_dir}/frame_%05d.png',
+                        '-i', input_path, '-map', '0:v', '-map', '1:a',
+                        '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p',
+                        '-b:v', '2M', 
+                        '-c:a', 'libopus', '-b:a', '128k',
+                        output_path
+                    ]
+                else:
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{rgb_frames_dir}/frame_%05d.png',
+                        '-c:v', 'libvpx-vp9', '-pix_fmt', 'yuv420p',
+                        '-b:v', '2M',
+                        output_path
+                    ]
+                
         elif ext.lower() == '.mov':
             # QuickTime with ProRes 4444 (supports alpha)
             if has_audio:
-                cmd = [
-                    'ffmpeg', '-y', '-framerate', str(fps), 
-                    '-i', f'{temp_frames_dir}/frame_%05d.png',
-                    '-i', input_path, '-map', '0:v', '-map', '1:a',
-                    '-c:v', 'prores_ks', '-profile:v', '4444',
-                    '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16',
-                    '-c:a', 'aac', '-b:a', '192k',
-                    output_path
-                ]
+                if high_quality:
+                    # Higher quality settings for better platform compatibility
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{temp_frames_dir}/frame_%05d.png',
+                        '-i', input_path, '-map', '0:v', '-map', '1:a',
+                        '-c:v', 'prores_ks', '-profile:v', '4444',
+                        '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16', '-vendor', 'ap10',
+                        '-q:v', '5', # Lower values = higher quality (1-5 range for ProRes)
+                        '-c:a', 'aac', '-b:a', '192k',
+                        output_path
+                    ]
+                else:
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{temp_frames_dir}/frame_%05d.png',
+                        '-i', input_path, '-map', '0:v', '-map', '1:a',
+                        '-c:v', 'prores_ks', '-profile:v', '4444',
+                        '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16',
+                        '-c:a', 'aac', '-b:a', '192k',
+                        output_path
+                    ]
             else:
-                cmd = [
-                    'ffmpeg', '-y', '-framerate', str(fps), 
-                    '-i', f'{temp_frames_dir}/frame_%05d.png',
-                    '-c:v', 'prores_ks', '-profile:v', '4444',
-                    '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16',
-                    output_path
-                ]
+                if high_quality:
+                    # Higher quality settings for better platform compatibility
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{temp_frames_dir}/frame_%05d.png',
+                        '-c:v', 'prores_ks', '-profile:v', '4444', 
+                        '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16', '-vendor', 'ap10',
+                        '-q:v', '5', # Lower values = higher quality (1-5 range for ProRes)
+                        output_path
+                    ]
+                else:
+                    cmd = [
+                        'ffmpeg', '-y', '-framerate', str(fps), 
+                        '-i', f'{temp_frames_dir}/frame_%05d.png',
+                        '-c:v', 'prores_ks', '-profile:v', '4444',
+                        '-pix_fmt', 'yuva444p10le', '-alpha_bits', '16',
+                        output_path
+                    ]
         else:
             # Default to QuickTime with ProRes 4444 if extension not recognized
             output_path_with_ext = os.path.splitext(output_path)[0] + '.mov'
@@ -324,10 +407,15 @@ def process_video(input_path, output_path, model_path,
         subprocess.run(cmd)
         
         # Clean up temp frames if needed
-        if not output_type == 'frames':
+        if output_type != 'frames':
             import shutil
             print(f"Cleaning up temporary frames in {temp_frames_dir}")
             shutil.rmtree(temp_frames_dir)
+            
+            # Also clean up RGB frames if they were created
+            if is_webm and not transparent:
+                print(f"Cleaning up temporary RGB frames in {rgb_frames_dir}")
+                shutil.rmtree(rgb_frames_dir)
     
     # If MP4 with green screen for transparency requested
     if mp4_alpha:
@@ -467,6 +555,8 @@ def parse_args():
                         help='Create video with transparency (requires ffmpeg)')
     parser.add_argument('--mp4-alpha', action='store_true',
                         help='Create MP4 with green screen for transparency')
+    parser.add_argument('--high-quality', '-q', action='store_true',
+                        help='Use higher quality settings for better platform compatibility')
     
     return parser.parse_args()
 
@@ -485,5 +575,6 @@ if __name__ == '__main__':
         downsample_ratio=args.downsample,
         device=args.device,
         transparent=args.transparent,
-        mp4_alpha=args.mp4_alpha
+        mp4_alpha=args.mp4_alpha,
+        high_quality=args.high_quality
     )
